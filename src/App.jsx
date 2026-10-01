@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { TDSLoader } from 'three/addons/loaders/TDSLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import './App.css';
@@ -262,12 +263,32 @@ function App() {
         }
         finalizeLoad(obj);
       });
+    } else if (ext === '3ds') {
+      const tdsLoader = new TDSLoader(manager);
+      tdsLoader.load(mainUrl, (obj) => {
+        // Many 3ds models are rotated 90 degrees on the X axis, but the user can use the sliders to fix it.
+        finalizeLoad(obj);
+      });
+    } else if (ext === 'ply') {
+      const viewer = new GaussianSplats3D.DropInViewer({
+        sharedMemoryForWorkers: false,
+        gpuAcceleratedSort: false,
+      });
+      const url = mainUrl + '#' + file.name;
+      viewer.addSplatScene(url, { splatAlphaCrop: 0, showLoadingUI: true })
+        .then(() => {
+          finalizeLoad(viewer);
+        })
+        .catch(err => {
+          console.error(err);
+          setLoadingMsg("Error loading PLY splat in editor.");
+        });
     }
     }, 100); // end setTimeout
   };
 
   const selectModel = (id) => {
-    setSelectedId(id);
+    setSelectedId(prev => prev === id ? null : id);
   };
 
   // Robust sync for TransformControls and SelectionBox
@@ -385,16 +406,9 @@ function App() {
     const files = Array.from(e.target.files);
     if (files.length === 0) return;
 
-    // Find main file
-    let mainFile = files.find(f => f.name.toLowerCase().endsWith('.ply'));
-    if (mainFile) {
-      loadSplat(mainFile);
-      return;
-    }
-
-    mainFile = files.find(f => {
+    let mainFile = files.find(f => {
       const ext = f.name.toLowerCase();
-      return ext.endsWith('.obj') || ext.endsWith('.glb') || ext.endsWith('.gltf');
+      return ext.endsWith('.obj') || ext.endsWith('.glb') || ext.endsWith('.gltf') || ext.endsWith('.3ds') || ext.endsWith('.ply');
     });
 
     if (mainFile) {
@@ -417,14 +431,18 @@ function App() {
   let activeRough = 0.5;
   let activePosX = 0;
   let activePosZ = 0;
+  let activeRotX = 0;
   let activeRotY = 0;
+  let activeRotZ = 0;
   let activeScale = 1;
 
   if (activeModel) {
     // Transform values
     activePosX = activeModel.object.position.x;
     activePosZ = activeModel.object.position.z;
+    activeRotX = THREE.MathUtils.radToDeg(activeModel.object.rotation.x);
     activeRotY = THREE.MathUtils.radToDeg(activeModel.object.rotation.y);
+    activeRotZ = THREE.MathUtils.radToDeg(activeModel.object.rotation.z);
     // UI scale is a multiplier of the baseScale
     activeScale = activeModel.baseScale ? (activeModel.object.scale.x / activeModel.baseScale) : activeModel.object.scale.x;
 
@@ -601,8 +619,18 @@ function App() {
                   </div>
 
                   <div className="prop-group">
-                    <label>Rotation Y (Putar)</label>
+                    <label>Rotation X (Maju/Mundur)</label>
+                    <input type="range" min="-180" max="180" step="5" value={activeRotX} onChange={e => updateTransform('rotation', 'x', e.target.value)} />
+                  </div>
+
+                  <div className="prop-group">
+                    <label>Rotation Y (Putar Kiri/Kanan)</label>
                     <input type="range" min="-180" max="180" step="5" value={activeRotY} onChange={e => updateTransform('rotation', 'y', e.target.value)} />
+                  </div>
+                  
+                  <div className="prop-group">
+                    <label>Rotation Z (Miring Kiri/Kanan)</label>
+                    <input type="range" min="-180" max="180" step="5" value={activeRotZ} onChange={e => updateTransform('rotation', 'z', e.target.value)} />
                   </div>
 
                   <div className="prop-group">
@@ -649,7 +677,7 @@ function App() {
               <input 
                 type="file" 
                 multiple
-                accept=".ply,.obj,.mtl,.glb,.gltf,.png,.jpg,.jpeg" 
+                accept=".ply,.obj,.mtl,.glb,.gltf,.3ds,.png,.jpg,.jpeg" 
                 onChange={handleFileUpload}
               />
             </label>
