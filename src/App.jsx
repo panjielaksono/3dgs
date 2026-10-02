@@ -41,6 +41,11 @@ function App() {
   // Staging State
   const [stagingObjFile, setStagingObjFile] = useState(null);
   const [supportFiles, setSupportFiles] = useState([]);
+  // AI Generation State
+  const [photoStagingFile, setPhotoStagingFile] = useState(null);
+  const [jobStatus, setJobStatus] = useState(null);
+  const [lastJobId, setLastJobId] = useState(null);
+  const [hasUserUploaded, setHasUserUploaded] = useState(false);
 
   // ==========================================
   // SPLAT ENGINE
@@ -49,6 +54,19 @@ function App() {
     setMode('splat');
     setLoadingMsg(`Processing Gaussian Splats (${file.name})...`);
     
+    // Cleanup editor mode
+    if (editorRef.current.animationId) {
+      cancelAnimationFrame(editorRef.current.animationId);
+      editorRef.current.animationId = null;
+    }
+    if (editorRef.current.renderer) {
+      editorRef.current.renderer.dispose();
+      if (editorContainerRef.current) editorContainerRef.current.innerHTML = '';
+      editorRef.current.renderer = null;
+    }
+    editorRef.current.models = [];
+    editorRef.current.scene = null;
+
     if (splatViewerRef.current) {
       try { splatViewerRef.current.dispose(); } catch(e){}
       splatContainerRef.current.innerHTML = '';
@@ -64,15 +82,17 @@ function App() {
     });
     splatViewerRef.current = viewer;
 
-    const url = URL.createObjectURL(file) + '#' + file.name;
-    viewer.addSplatScene(url, { splatAlphaCrop: 0, showLoadingUI: true, format: 2 })
+    const url = URL.createObjectURL(file);
+    viewer.addSplatScene(url, { splatAlphaCrop: 0, showLoadingUI: true, format: GaussianSplats3D.SceneFormat.Ply })
       .then(() => {
         setLoadingMsg("");
         viewer.start();
+        URL.revokeObjectURL(url);
       })
       .catch(err => {
         console.error(err);
         setLoadingMsg("Error loading splat.");
+        URL.revokeObjectURL(url);
       });
   };
 
@@ -80,6 +100,13 @@ function App() {
   // THREE.JS EDITOR ENGINE
   // ==========================================
   const initEditor = () => {
+    // Cleanup splat mode
+    if (splatViewerRef.current) {
+      try { splatViewerRef.current.dispose(); } catch(e){}
+      splatViewerRef.current = null;
+      if (splatContainerRef.current) splatContainerRef.current.innerHTML = '';
+    }
+
     if (editorRef.current.renderer) return; // already init
 
     const container = editorContainerRef.current;
@@ -402,9 +429,21 @@ function App() {
     };
   }, []);
 
-  const handleFileUpload = (e) => {
+  const detectPlyKind = async (file) => {
+    const head = await file.slice(0, 8192).text();
+    const end = head.indexOf('end_header');
+    const header = end >= 0 ? head.slice(0, end) : head;
+
+    if (/property\s+\w+\s+f_dc_0/.test(header)) return 'splat';
+    if (/element\s+face\s+[1-9]/.test(header)) return 'mesh';
+    return 'points';
+  };
+
+  const handleFileUpload = async (e) => {
     const files = Array.from(e.target.files);
     if (files.length === 0) return;
+    
+    setHasUserUploaded(true);
 
     let mainFile = files.find(f => {
       const ext = f.name.toLowerCase();
@@ -412,15 +451,73 @@ function App() {
     });
 
     if (mainFile) {
-      if (files.length > 1) {
-        // User uploaded multiple files at once, load directly
-        const sFiles = files.filter(f => f !== mainFile);
-        loadModelToEditor(mainFile, sFiles);
+      if (mainFile.name.toLowerCase().endsWith('.ply') && (await detectPlyKind(mainFile)) === 'splat') {
+        loadSplat(mainFile);
       } else {
-        // Single file uploaded, enter staging to ask for MTL/Textures
-        setStagingObjFile(mainFile);
-        setSupportFiles([]);
+        if (files.length > 1) {
+          // User uploaded multiple files at once, load directly
+          const sFiles = files.filter(f => f !== mainFile);
+          loadModelToEditor(mainFile, sFiles);
+        } else {
+          // Single file uploaded, enter staging to ask for MTL/Textures
+          setStagingObjFile(mainFile);
+          setSupportFiles([]);
+        }
       }
+    }
+  };
+
+  const handlePhotoUpload = (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+    setPhotoStagingFile(files[0]);
+  };
+
+  const startGenerationJob = async (file) => {
+    setJobStatus({ status: 'uploading' });
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      const res = await fetch('/api/jobs', {
+        method: 'POST',
+        body: formData
+      });
+      if (!res.ok) throw new Error('API failed');
+      const data = await res.json();
+      
+      setJobStatus({ id: data.id, status: 'queued' });
+      pollJobStatus(data.id);
+    } catch (err) {
+      console.error(err);
+      alert('Failed to connect to API. Make sure the backend is running.');
+      setJobStatus(null);
+      setPhotoStagingFile(null);
+    }
+  };
+
+  const pollJobStatus = async (id) => {
+    try {
+      const res = await fetch(`/api/jobs/${id}`);
+      const data = await res.json();
+      
+      setJobStatus({ id, status: data.status });
+      
+      if (data.status === 'done') {
+        setJobStatus(null);
+        setPhotoStagingFile(null);
+        setLastJobId(id);
+        alert('3D Generation Complete! Click the SOURCES button to download your .ply file, then UPLOAD it.');
+      } else if (data.status === 'error') {
+        alert('GPU Worker failed to process the image.');
+        setJobStatus(null);
+        setPhotoStagingFile(null);
+      } else {
+        setTimeout(() => pollJobStatus(id), 2000);
+      }
+    } catch (err) {
+      console.error(err);
+      setTimeout(() => pollJobStatus(id), 2000);
     }
   };
 
@@ -537,23 +634,46 @@ function App() {
         </div>
       )}
 
-      {!loadingMsg && !stagingObjFile && (
+      {/* Photo Generation Overlay */}
+      {(photoStagingFile || jobStatus) && (
+        <div className="upload-overlay">
+          <div className="game-panel staging-panel">
+            <h1 className="game-title">AI 3D Generator</h1>
+            
+            {!jobStatus ? (
+              <>
+                <p>You selected <strong>{photoStagingFile.name}</strong></p>
+                <div style={{margin: '20px 0'}}>
+                   <img src={URL.createObjectURL(photoStagingFile)} style={{maxHeight: '200px', borderRadius: '8px'}} />
+                </div>
+                <p className="subtitle">Ready to send to GPU Worker for processing.</p>
+                <div className="staging-buttons">
+                  <button className="action-btn cancel-btn" onClick={() => setPhotoStagingFile(null)}>Cancel</button>
+                  <button className="action-btn" onClick={() => startGenerationJob(photoStagingFile)}>Generate 3D</button>
+                </div>
+              </>
+            ) : (
+              <div style={{textAlign: 'center', margin: '20px 0'}}>
+                <p style={{fontSize: '1.2rem', marginBottom: '15px'}}>Status: <strong>{jobStatus.status.toUpperCase()}</strong></p>
+                <div className="loader" style={{margin: '0 auto'}}></div>
+                {jobStatus.status === 'done' && <p style={{marginTop: '15px'}}>Downloading result...</p>}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {!loadingMsg && !stagingObjFile && !photoStagingFile && !jobStatus && (
         <>
-          {/* Header */}
-          <header className="game-header">
-            <div className="hud-badge">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
-                <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-                <line x1="12" y1="22.08" x2="12" y2="12"></line>
-              </svg>
-              <span>3D Workspace</span>
-            </div>
-            <div className="status-badge">
-              <span className="dot pulse"></span>
-              {mode === 'splat' ? 'Splat Mode' : 'Editor Mode'}
-            </div>
-          </header>
+          {hasUserUploaded && (
+            <button 
+              className="bottom-btn btn-red" 
+              style={{ position: 'absolute', top: '20px', left: '20px', zIndex: 1000, padding: '10px 20px', fontSize: '1rem' }}
+              onClick={() => window.location.reload()}
+            >
+              ⬅ BACK
+            </button>
+          )}
 
           {/* EDITOR UI */}
           {mode === 'editor' && (
@@ -658,30 +778,47 @@ function App() {
             </>
           )}
 
-          {/* Bottom Upload & Snapshot */}
-          <div className="bottom-panel">
-            {mode === 'editor' && (
-              <button className="action-btn secondary-btn" onClick={takeSnapshot} style={{marginRight: '16px'}}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
-                Snapshot
-              </button>
-            )}
 
-            <label className="action-btn">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                <polyline points="17 8 12 3 7 8"></polyline>
-                <line x1="12" y1="3" x2="12" y2="15"></line>
-              </svg>
-              Upload 3D Files
-              <input 
-                type="file" 
-                multiple
-                accept=".ply,.obj,.mtl,.glb,.gltf,.3ds,.png,.jpg,.jpeg" 
-                onChange={handleFileUpload}
-              />
-            </label>
-          </div>
+          {/* Bottom Panel (Stacked Buttons) */}
+          {!hasUserUploaded && (
+            <div className="bottom-panel">
+              <label className="bottom-btn btn-red">
+                GENERATE
+                <input 
+                  type="file" 
+                  accept=".png,.jpg,.jpeg" 
+                  onChange={handlePhotoUpload}
+                  style={{display: 'none'}}
+                />
+              </label>
+
+              <label className="bottom-btn btn-green">
+                UPLOAD
+                <input 
+                  type="file" 
+                  multiple
+                  accept=".ply,.obj,.mtl,.glb,.gltf,.3ds,.png,.jpg,.jpeg" 
+                  onChange={handleFileUpload}
+                  style={{display: 'none'}}
+                />
+              </label>
+
+              {lastJobId ? (
+                <a 
+                  href={`/api/files/${lastJobId}`} 
+                  download={`generated_${lastJobId}.ply`}
+                  className="bottom-btn btn-blue" 
+                  style={{textDecoration: 'none'}}
+                >
+                  SOURCES
+                </a>
+              ) : (
+                <button className="bottom-btn btn-blue" onClick={() => alert("Fitur untuk pindah page belum diimplementasi, nanti dulu ya!")}>
+                  SOURCES
+                </button>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>
