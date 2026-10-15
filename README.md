@@ -1,6 +1,6 @@
 # 3dgs
 
-A beautiful web-based 3D Gaussian Splats viewer and end-to-end AI Generator built with React, Vite, and [FaceLift](https://github.com/mkkellogg/GaussianSplats3D).
+A web-based 3D Gaussian Splats viewer and AI generator built with React, Vite, and [FaceLift](https://github.com/weijielyu/FaceLift).
 
 ## Architecture & Pipeline
 
@@ -14,8 +14,8 @@ This repository consists of a fully integrated pipeline to generate 3D Gaussian 
 * **GPU**: NVIDIA GPU with minimum **6GB VRAM** (RTX 4050 Laptop or better). Note: Generation process pushes GPU utilization to 100%.
 * **RAM**: **20GB+ RAM** required (or 16GB RAM + massive Pagefile/Virtual Memory). 
 * **Storage**:
-  * FaceLift Pre-trained Models: ~4GB (stored in `/checkpoints`)
-  * Generated Output: ~55MB per `.ply` file (stored in `/storage`)
+  * FaceLift pre-trained models: ~4GB (stored in `./checkpoints`, mounted at `/app/FaceLift/checkpoints`). FaceLift downloads these from [Hugging Face](https://huggingface.co/wlyu/OpenFaceLift) on first use.
+  * Generated Output: ~55MB per `.ply` file (stored in `./storage`)
 
 ## Environment Variables
 Copy `.env.example` to `.env` and adjust as needed:
@@ -43,3 +43,7 @@ npm install
 npm run dev
 ```
 Open `http://localhost:5173` in your browser. Click **GENERATE**, upload a single face photo, and wait for your GPU to carve it into 3D!
+
+Uploads are limited to 10 MB and must be valid JPEG or PNG images. Set `MAX_UPLOAD_BYTES` on the API service to change the limit. Job statuses are stored as JSON files in `./storage/jobs`, so a failed inference or API restart does not leave the browser waiting indefinitely. Check the worker logs for inference errors.
+
+FaceLift's bundled research materials are subject to the license files in `worker/FaceLift`; review those terms before using the generator beyond research.

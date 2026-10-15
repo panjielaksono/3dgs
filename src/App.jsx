@@ -44,13 +44,61 @@ function App() {
   // AI Generation State
   const [photoStagingFile, setPhotoStagingFile] = useState(null);
   const [jobStatus, setJobStatus] = useState(null);
-  const [lastJobId, setLastJobId] = useState(null);
   const [hasUserUploaded, setHasUserUploaded] = useState(false);
+  const [photoPreviewUrl, setPhotoPreviewUrl] = useState(null);
+
+  // Splat Settings State
+  const [currentSplatFile, setCurrentSplatFile] = useState(null);
+  const [splatYUp, setSplatYUp] = useState(-1);
+  const [showCredits, setShowCredits] = useState(false);
+
+  useEffect(() => () => {
+    if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
+  }, [photoPreviewUrl]);
+
+  useEffect(() => {
+    if (!jobStatus?.id || !['queued', 'running'].includes(jobStatus.status)) return;
+    let cancelled = false;
+    let timer;
+    let failedPolls = 0;
+    const controller = new AbortController();
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/jobs/${jobStatus.id}`, { signal: controller.signal });
+        if (!res.ok) throw new Error(`Status request failed: ${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+        failedPolls = 0;
+        if (data.status !== jobStatus.status || data.error) {
+          setJobStatus(data);
+        } else {
+          timer = setTimeout(poll, 2000);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        console.error(err);
+        failedPolls += 1;
+        if (failedPolls >= 5) {
+          setJobStatus({ id: jobStatus.id, status: 'error', error: 'Cannot reach the API. Please try again.' });
+        } else {
+          timer = setTimeout(poll, 2000);
+        }
+      }
+    };
+    timer = setTimeout(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [jobStatus?.id, jobStatus?.status]);
 
   // ==========================================
   // SPLAT ENGINE
   // ==========================================
-  const loadSplat = (file) => {
+  const loadSplat = (file, yUp = -1) => {
+    setCurrentSplatFile(file);
+    setSplatYUp(yUp);
     setMode('splat');
     setLoadingMsg(`Processing Gaussian Splats (${file.name})...`);
     
@@ -68,14 +116,14 @@ function App() {
     editorRef.current.scene = null;
 
     if (splatViewerRef.current) {
-      try { splatViewerRef.current.dispose(); } catch(e){}
+      try { splatViewerRef.current.dispose(); } catch {}
       splatContainerRef.current.innerHTML = '';
     }
 
     const viewer = new GaussianSplats3D.Viewer({
       rootElement: splatContainerRef.current,
-      cameraUp: [0, 1, 0],
-      initialCameraPosition: [-1, -1, -1],
+      cameraUp: [0, yUp, 0],
+      initialCameraPosition: [0, 0, 3],
       initialCameraLookAt: [0, 0, 0],
       sharedMemoryForWorkers: false,
       gpuAcceleratedSort: false,
@@ -102,7 +150,7 @@ function App() {
   const initEditor = () => {
     // Cleanup splat mode
     if (splatViewerRef.current) {
-      try { splatViewerRef.current.dispose(); } catch(e){}
+      try { splatViewerRef.current.dispose(); } catch {}
       splatViewerRef.current = null;
       if (splatContainerRef.current) splatContainerRef.current.innerHTML = '';
     }
@@ -471,6 +519,7 @@ function App() {
     const files = Array.from(e.target.files);
     if (files.length === 0) return;
     setPhotoStagingFile(files[0]);
+    setPhotoPreviewUrl(URL.createObjectURL(files[0]));
   };
 
   const startGenerationJob = async (file) => {
@@ -483,46 +532,21 @@ function App() {
         method: 'POST',
         body: formData
       });
-      if (!res.ok) throw new Error('API failed');
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({}));
+        throw new Error(error.detail || 'Could not submit the job');
+      }
       const data = await res.json();
       
       setJobStatus({ id: data.id, status: 'queued' });
-      pollJobStatus(data.id);
     } catch (err) {
       console.error(err);
-      alert('Failed to connect to API. Make sure the backend is running.');
-      setJobStatus(null);
-      setPhotoStagingFile(null);
-    }
-  };
-
-  const pollJobStatus = async (id) => {
-    try {
-      const res = await fetch(`/api/jobs/${id}`);
-      const data = await res.json();
-      
-      setJobStatus({ id, status: data.status });
-      
-      if (data.status === 'done') {
-        setJobStatus(null);
-        setPhotoStagingFile(null);
-        setLastJobId(id);
-        alert('3D Generation Complete! Click the SOURCES button to download your .ply file, then UPLOAD it.');
-      } else if (data.status === 'error') {
-        alert('GPU Worker failed to process the image.');
-        setJobStatus(null);
-        setPhotoStagingFile(null);
-      } else {
-        setTimeout(() => pollJobStatus(id), 2000);
-      }
-    } catch (err) {
-      console.error(err);
-      setTimeout(() => pollJobStatus(id), 2000);
+      setJobStatus({ status: 'error', error: err.message });
     }
   };
 
   // Get active model props
-  const activeModel = editorRef.current.models.find(m => m.id === selectedId);
+  const activeModel = models.find(m => m.id === selectedId);
   let activeColor = "#ffffff";
   let activeMetal = 0.5;
   let activeRough = 0.5;
@@ -644,26 +668,75 @@ function App() {
               <>
                 <p>You selected <strong>{photoStagingFile.name}</strong></p>
                 <div style={{margin: '20px 0'}}>
-                   <img src={URL.createObjectURL(photoStagingFile)} style={{maxHeight: '200px', borderRadius: '8px'}} />
+                   {photoPreviewUrl && <img src={photoPreviewUrl} alt="Selected face" style={{maxHeight: '200px', borderRadius: '8px'}} />}
                 </div>
                 <p className="subtitle">Ready to send to GPU Worker for processing.</p>
                 <div className="staging-buttons">
-                  <button className="action-btn cancel-btn" onClick={() => setPhotoStagingFile(null)}>Cancel</button>
+                  <button className="action-btn cancel-btn" onClick={() => { setPhotoStagingFile(null); setPhotoPreviewUrl(null); }}>Cancel</button>
                   <button className="action-btn" onClick={() => startGenerationJob(photoStagingFile)}>Generate 3D</button>
                 </div>
               </>
             ) : (
               <div style={{textAlign: 'center', margin: '20px 0'}}>
                 <p style={{fontSize: '1.2rem', marginBottom: '15px'}}>Status: <strong>{jobStatus.status.toUpperCase()}</strong></p>
-                <div className="loader" style={{margin: '0 auto'}}></div>
-                {jobStatus.status === 'done' && <p style={{marginTop: '15px'}}>Downloading result...</p>}
+                {jobStatus.status === 'done' ? (
+                  <>
+                    <p style={{marginTop: '15px', color: '#4ade80'}}>3D Generation Complete!</p>
+                    <div className="staging-buttons" style={{marginTop: '20px'}}>
+                      <a
+                        href={`/api/files/${jobStatus.id}`}
+                        download={`generated_${jobStatus.id}.ply`}
+                        className="action-btn"
+                        style={{textDecoration: 'none'}}
+                      >
+                        ⬇ Download .PLY
+                      </a>
+                      <button className="action-btn cancel-btn" onClick={() => {
+                        setJobStatus(null);
+                        setPhotoStagingFile(null);
+                        setPhotoPreviewUrl(null);
+                      }}>Close</button>
+                    </div>
+                  </>
+                ) : jobStatus.status === 'error' ? (
+                  <>
+                    <p role="alert">{jobStatus.error || 'Generation failed. Please try again.'}</p>
+                    <div className="staging-buttons">
+                      <button className="action-btn cancel-btn" onClick={() => { setJobStatus(null); setPhotoStagingFile(null); setPhotoPreviewUrl(null); }}>Close</button>
+                      {photoStagingFile && <button className="action-btn" onClick={() => startGenerationJob(photoStagingFile)}>Retry</button>}
+                    </div>
+                  </>
+                ) : (
+                  <div className="loader" style={{margin: '0 auto'}}></div>
+                )}
               </div>
             )}
           </div>
         </div>
       )}
 
-      {!loadingMsg && !stagingObjFile && !photoStagingFile && !jobStatus && (
+      {/* Credits Overlay */}
+      {showCredits && (
+        <div className="upload-overlay">
+          <div className="game-panel staging-panel">
+            <h1 className="game-title" style={{fontSize: '2rem', marginBottom: '15px'}}>Credits / Sources</h1>
+            <div style={{ textAlign: 'center', margin: '20px 0' }}>
+              <p style={{fontSize: '1.1rem'}}>Pipeline 3D Generator ini menggunakan model AI:</p>
+              <ul style={{ textAlign: 'left', display: 'inline-block', margin: '15px 0', fontSize: '1rem', lineHeight: '1.6' }}>
+                <li><strong>GS-LRM</strong> - untuk rekonstruksi 3D Gaussian Splatting.</li>
+                <li><strong>Stable Diffusion (UnCLIP)</strong> - untuk ekstrapolasi multi-view.</li>
+                <li><strong>Rembg (U2Net)</strong> - untuk penghapusan background cerdas.</li>
+                <li><strong>Three.js & Gaussian Splat 3D</strong> - untuk rendering UI di browser.</li>
+              </ul>
+            </div>
+            <div className="staging-buttons" style={{ justifyContent: 'center' }}>
+              <button className="action-btn cancel-btn" onClick={() => setShowCredits(false)}>Tutup</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!loadingMsg && !stagingObjFile && !photoStagingFile && !jobStatus && !showCredits && (
         <>
           {hasUserUploaded && (
             <button 
@@ -673,6 +746,28 @@ function App() {
             >
               ⬅ BACK
             </button>
+          )}
+
+          {/* SPLAT UI CONTROLS */}
+          {mode === 'splat' && currentSplatFile && (
+            <div style={{ position: 'absolute', top: '20px', right: '20px', zIndex: 1000 }}>
+              <button
+                className="action-btn"
+                style={{
+                  padding: '10px 15px',
+                  background: 'rgba(0,0,0,0.5)',
+                  backdropFilter: 'blur(5px)',
+                  border: '1px solid rgba(255,255,255,0.2)',
+                  color: 'white',
+                  cursor: 'pointer',
+                  borderRadius: '8px',
+                  fontWeight: 'bold'
+                }}
+                onClick={() => loadSplat(currentSplatFile, splatYUp === -1 ? 1 : -1)}
+              >
+                🔄 Flip Orientation (Y: {splatYUp === -1 ? 'Down' : 'Up'})
+              </button>
+            </div>
           )}
 
           {/* EDITOR UI */}
@@ -721,6 +816,7 @@ function App() {
                         <button className={`tool-btn ${transformMode === 'translate' ? 'active' : ''}`} onClick={() => setTransformMode('translate')}>Move</button>
                         <button className={`tool-btn ${transformMode === 'rotate' ? 'active' : ''}`} onClick={() => setTransformMode('rotate')}>Rotate</button>
                         <button className={`tool-btn ${transformMode === 'scale' ? 'active' : ''}`} onClick={() => setTransformMode('scale')}>Scale</button>
+                        <button className="tool-btn" onClick={takeSnapshot}>Snapshot</button>
                       </div>
 
                   <div className="prop-group">
@@ -803,20 +899,9 @@ function App() {
                 />
               </label>
 
-              {lastJobId ? (
-                <a 
-                  href={`/api/files/${lastJobId}`} 
-                  download={`generated_${lastJobId}.ply`}
-                  className="bottom-btn btn-blue" 
-                  style={{textDecoration: 'none'}}
-                >
-                  SOURCES
-                </a>
-              ) : (
-                <button className="bottom-btn btn-blue" onClick={() => alert("Fitur untuk pindah page belum diimplementasi, nanti dulu ya!")}>
-                  SOURCES
-                </button>
-              )}
+              <button className="bottom-btn btn-blue" onClick={() => setShowCredits(true)}>
+                SOURCES
+              </button>
             </div>
           )}
         </>
