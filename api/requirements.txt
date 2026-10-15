@@ -2,3 +2,4 @@ fastapi
 uvicorn
 pika
 python-multipart
+Pillow==10.4.0

@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
   rabbitmq:
     image: rabbitmq:3-management
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-user}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-password}
@@ -21,6 +19,8 @@ services:
       - "8000:8000"
     environment:
       - RABBITMQ_URL=${RABBITMQ_URL:-amqp://user:password@rabbitmq:5672/}
+      - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-10485760}
+      - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-http://localhost:5173}
     volumes:
       - ./storage:/app/storage
     depends_on:
@@ -40,7 +40,7 @@ services:
       - RABBITMQ_URL=${RABBITMQ_URL:-amqp://user:password@rabbitmq:5672/}
     volumes:
       - ./storage:/app/storage
-      - ./checkpoints:/app/checkpoints
+      - ./checkpoints:/app/FaceLift/checkpoints
     depends_on:
       rabbitmq:
         condition: service_healthy

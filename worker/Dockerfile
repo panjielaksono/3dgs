@@ -14,7 +14,8 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 ENV TORCH_CUDA_ARCH_LIST="8.9"
 RUN pip3 install git+https://github.com/graphdeco-inria/diff-gaussian-rasterization
 
-RUN git clone https://github.com/weijielyu/FaceLift.git
+RUN git clone https://github.com/weijielyu/FaceLift.git && \
+    cd FaceLift && git checkout 0a9420c1480db1e22daa6dee192b76a013295992
 
 RUN pip3 install onnxruntime-gpu
 
